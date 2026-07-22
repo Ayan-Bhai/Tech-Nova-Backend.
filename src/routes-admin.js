@@ -324,9 +324,16 @@ admin.put('/messages/:id/read', async (c) => {
 admin.get('/settings', async (c) => {
   const user = await getSetting('gmail_user') || process.env.GMAIL_USER || ''
   const pass = await getSetting('gmail_pass') || process.env.GMAIL_APP_PASSWORD || ''
+  const brevo = await getSetting('brevo_key') || process.env.BREVO_API_KEY || ''
+  const resend = await getSetting('resend_key') || process.env.RESEND_API_KEY || ''
+  const fromEmail = await getSetting('mail_from') || process.env.MAIL_FROM || ''
   const sk = await getSetting('stripe_sk') || process.env.STRIPE_SECRET_KEY || ''
   const banner = Number(await getSetting('banner_product')) || null
-  return c.json({ gmail_user: user, gmail_pass_set: !!pass, stripe_set: !!sk, banner_product: banner })
+  return c.json({
+    gmail_user: user, gmail_pass_set: !!pass,
+    brevo_set: !!brevo, resend_set: !!resend, mail_from: fromEmail,
+    stripe_set: !!sk, banner_product: banner
+  })
 })
 admin.put('/settings', async (c) => {
   const b = await c.req.json().catch(() => ({}))
@@ -338,6 +345,17 @@ admin.put('/settings', async (c) => {
   if (typeof b.gmail_pass === 'string' && b.gmail_pass.trim()) {
     await setSetting('gmail_pass', b.gmail_pass.trim())
   }
+  if (typeof b.brevo_key === 'string' && b.brevo_key.trim()) {
+    await setSetting('brevo_key', b.brevo_key.trim())
+  }
+  if (typeof b.resend_key === 'string' && b.resend_key.trim()) {
+    await setSetting('resend_key', b.resend_key.trim())
+  }
+  if (typeof b.mail_from === 'string') {
+    const mf = b.mail_from.trim().toLowerCase()
+    if (mf && !/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(mf)) return c.json({ error: 'Sender must be a valid email address.' }, 400)
+    await setSetting('mail_from', mf)
+  }
   if (typeof b.stripe_sk === 'string' && b.stripe_sk.trim()) {
     const sk = b.stripe_sk.trim()
     if (!/^(sk_test_|sk_live_|rk_test_|rk_live_)/.test(sk)) return c.json({ error: 'Stripe key must start with sk_test_ or sk_live_.' }, 400)
@@ -346,11 +364,13 @@ admin.put('/settings', async (c) => {
   return c.json({ ok: true })
 })
 admin.post('/settings/test-email', async (c) => {
-  const { user } = await mailConfig()
-  if (!user) return c.json({ error: 'Set your Gmail address first.' }, 400)
-  const ok = await sendMail(user, 'TechNova test email ✔',
+  const { user, pass, brevoKey, resendKey, fromEmail } = await mailConfig()
+  const to = fromEmail || user
+  if (!to) return c.json({ error: 'Set a sender email address first.' }, 400)
+  if (!brevoKey && !resendKey && !(user && pass)) return c.json({ error: 'Configure an email provider first (Brevo / Resend API key, or Gmail + App Password).' }, 400)
+  const ok = await sendMail(to, 'TechNova test email ✔',
     emailHtml('Email is working!', `<p style="margin:0;color:#444;font-size:14px;line-height:1.6">Your website can now send verification codes and order emails. 🎉</p>`))
-  return c.json(ok ? { ok: true } : { error: 'Sending failed — check the Gmail address and app password.' }, ok ? 200 : 400)
+  return c.json(ok ? { ok: true } : { error: 'Sending failed — check your API key / sender email. Note: Gmail SMTP is BLOCKED on Railway Free/Trial/Hobby plans; use a Brevo or Resend API key instead.' }, ok ? 200 : 400)
 })
 
 /* ---------- site identity / SEO / services / logo ---------- */
