@@ -25,7 +25,8 @@ export function emailHtml(title, bodyHtml, brand = 'TechNova') {
 }
 
 export async function sendMail(to, subject, html) {
-  let { user, pass } = await mailConfig()
+  console.log('GMAIL_USER:', user)
+  console.log('Has password:', !!pass)
   if (!user || !pass) return false
   user = user.trim(); pass = pass.replace(/\s+/g, '')
 
