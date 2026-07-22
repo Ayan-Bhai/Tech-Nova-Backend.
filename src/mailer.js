@@ -36,7 +36,10 @@ export async function sendMail(to, subject, html) {
     const finish = (ok, why) => {
       if (done) return
       done = true
-      if (!ok && why) console.error('sendMail failed:', why)
+      if (!ok) {
+      console.error('=== EMAIL ERROR ===')
+      console.error('Reason:', why)
+}
       try { sock.end() } catch {}
       resolve(ok)
     }
