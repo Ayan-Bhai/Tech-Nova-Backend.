@@ -16,6 +16,9 @@ async function makeSession(userId) {
   return token
 }
 
+/* signup — NO email verification: account is created verified and
+   logged in immediately. A welcome email is attempted in the
+   background but never blocks or fails the signup. */
 auth.post('/signup', async (c) => {
   const { name, email, password } = await c.req.json().catch(() => ({}))
   if (!name || !email || !password) return c.json({ error: 'All fields are required.' }, 400)
@@ -28,25 +31,30 @@ auth.post('/signup', async (c) => {
 
   const salt = randHex(8)
   const hash = sha256hex(salt + password)
-  const code = code6()
-  const expires = Date.now() + 15 * 60 * 1000
 
+  let userId
   if (existing) {
-    await run(`UPDATE users SET name=$1, pass_hash=$2, salt=$3, verify_code=$4, verify_expires=$5 WHERE id=$6`,
-      [String(name).trim(), hash, salt, code, expires, existing.id])
+    // leftover unverified signup — take over the row
+    await run(`UPDATE users SET name=$1, pass_hash=$2, salt=$3, verified=1, verify_code=NULL, verify_expires=NULL WHERE id=$4`,
+      [String(name).trim(), hash, salt, existing.id])
+    userId = existing.id
   } else {
-    await run(`INSERT INTO users (email, name, pass_hash, salt, verify_code, verify_expires) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [em, String(name).trim(), hash, salt, code, expires])
+    const r = await one(
+      `INSERT INTO users (email, name, pass_hash, salt, verified) VALUES ($1,$2,$3,$4,1) RETURNING id`,
+      [em, String(name).trim(), hash, salt])
+    userId = r.id
   }
 
-  const sent = await sendMail(em, 'Your TechNova verification code: ' + code,
-    emailHtml('Verify your email',
-      `<p style="margin:0 0 18px;color:#444;font-size:14px;line-height:1.6">Hi ${String(name).replace(/[<>&]/g, '')}, use this code to activate your TechNova account. It expires in <strong>15 minutes</strong>.</p>` +
-      `<div style="text-align:center;padding:18px;background:#f6f6f6;border-radius:12px;font-size:32px;font-weight:bold;letter-spacing:10px;color:#111">${code}</div>`))
+  const token = await makeSession(userId)
+  const user = await one(`SELECT id::int, email, name, role FROM users WHERE id = $1`, [userId])
 
-  const resp = { ok: true, emailSent: sent }
-  if (!sent && DEV_SHOW_CODE()) resp.devCode = code
-  return c.json(resp)
+  /* fire-and-forget welcome email — never blocks signup */
+  sendMail(em, 'Welcome to TechNova 🎉',
+    emailHtml('Welcome to TechNova',
+      `<p style="margin:0;color:#444;font-size:14px;line-height:1.6">Hi ${String(name).replace(/[<>&]/g, '')}, your account is ready — happy shopping!</p>`))
+    .catch(() => {})
+
+  return c.json({ ok: true, token, user })
 })
 
 auth.post('/verify', async (c) => {
@@ -103,7 +111,8 @@ auth.post('/login', async (c) => {
   if (!u) return c.json({ error: 'No account with this email.' }, 400)
   const hash = sha256hex(u.salt + password)
   if (hash !== u.pass_hash) return c.json({ error: 'Wrong password.' }, 400)
-  if (!u.verified) return c.json({ error: 'Account not verified. Sign up again to get a code.' }, 400)
+  /* email verification removed — auto-verify old unverified accounts on successful login */
+  if (!u.verified) await run(`UPDATE users SET verified = 1, verify_code = NULL WHERE id = $1`, [u.id])
   const token = await makeSession(u.id)
   return c.json({ ok: true, token, user: { id: Number(u.id), email: u.email, name: u.name, role: u.role } })
 })
