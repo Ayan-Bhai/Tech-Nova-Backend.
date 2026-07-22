@@ -26,21 +26,6 @@ export function emailHtml(title, bodyHtml, brand = 'TechNova') {
 
 export async function sendMail(to, subject, html) {
   let { user, pass } = await mailConfig()
-
-  console.log("========== SMTP DEBUG ==========")
-  console.log("GMAIL_USER:", user)
-  console.log("Has password:", !!pass)
-
-  if (!user || !pass) {
-    console.error("Missing Gmail credentials")
-    return false
-  }
-
-  user = user.trim()
-  pass = pass.replace(/\s+/g, "")
-
-  // ...rest of your existing code...
-}
   if (!user || !pass) return false
   user = user.trim(); pass = pass.replace(/\s+/g, '')
 
@@ -50,11 +35,8 @@ export async function sendMail(to, subject, html) {
     const finish = (ok, why) => {
       if (done) return
       done = true
-      if (!ok) {
-      console.error('=== EMAIL ERROR ===')
-      console.error('Reason:', why)
-}
-      try { sock.end() } catch {}
+      if (!ok && why) console.error('sendMail failed:', why)
+      try { sock.destroy() } catch {}
       resolve(ok)
     }
 
@@ -62,45 +44,55 @@ export async function sendMail(to, subject, html) {
     sock.setTimeout(20000, () => finish(false, 'timeout'))
     sock.on('error', (e) => finish(false, e.message))
 
-    /* SMTP conversation as a queue of [command, expectedCodes] */
-    const msg = [
-      'From: TechNova <' + user + '>',
-      'To: <' + to + '>',
-      'Subject: ' + subject,
-      'MIME-Version: 1.0',
-      'Content-Type: text/html; charset=utf-8',
-      '',
-      html.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..'),
-      '.'
-    ].join('\r\n')
+    // Dot-stuff any body lines starting with '.'
+    const body = html.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..')
+
+    // Full DATA payload per RFC 5321:
+    //   headers \r\n\r\n body \r\n.\r\n
+    const dataPayload =
+      'From: TechNova <' + user + '>\r\n' +
+      'To: <' + to + '>\r\n' +
+      'Subject: ' + subject + '\r\n' +
+      'MIME-Version: 1.0\r\n' +
+      'Content-Type: text/html; charset=utf-8\r\n' +
+      '\r\n' +
+      body + '\r\n' +
+      '.'   // lone dot — sock.write appends \r\n below
 
     const steps = [
-      [null, ['220']],                                     // greeting
-      ['EHLO technova.local', ['250']],
-      ['AUTH LOGIN', ['334']],
-      [Buffer.from(user).toString('base64'), ['334']],
-      [Buffer.from(pass).toString('base64'), ['235']],
-      ['MAIL FROM:<' + user + '>', ['250']],
-      ['RCPT TO:<' + to + '>', ['250', '251']],
-      ['DATA', ['354']],
-      [msg, ['250']],
-      ['QUIT', ['221']]
+      [null,                                 ['220']], // 0 — server greeting
+      ['EHLO technova.local',                ['250']], // 1 — may be multi-line
+      ['AUTH LOGIN',                         ['334']], // 2
+      [Buffer.from(user).toString('base64'), ['334']], // 3 — username
+      [Buffer.from(pass).toString('base64'), ['235']], // 4 — password
+      ['MAIL FROM:<' + user + '>',          ['250']], // 5
+      ['RCPT TO:<' + to + '>',             ['250', '251']], // 6
+      ['DATA',                               ['354']], // 7
+      [dataPayload,                          ['250']], // 8 — body + lone dot
+      ['QUIT',                               ['221']]  // 9
     ]
     let step = 0
 
     function advance() {
-      // find a complete final reply line: "NNN text\r\n" (space after code = last line)
-      const m = buf.match(/(?:^|\r\n)(\d{3}) [^\r\n]*\r\n/)
+      // SMTP multi-line replies (e.g. EHLO): continuation lines use dash "250-..."
+      // The FINAL line of any reply uses a space "250 OK\r\n"
+      // Match the last such final line in the buffer.
+      const m = buf.match(/(\d{3}) [^\r\n]*\r\n$/)
       if (!m) return
       const code = m[1]
       buf = ''
+
       const [, expect] = steps[step]
       if (!expect.includes(code)) {
-        if (step === steps.length - 1) return finish(true) // QUIT reply mismatch — mail already sent
+        if (step === steps.length - 1) return finish(true) // QUIT mismatch is fine — mail sent
         return finish(false, 'SMTP ' + code + ' at step ' + step)
       }
+
       step++
       if (step >= steps.length) return finish(true)
+
+      // Every command including the DATA body gets \r\n appended.
+      // The body ends with a bare '.' and sock.write adds '\r\n' → ".\r\n" which is correct.
       sock.write(steps[step][0] + '\r\n')
     }
 
