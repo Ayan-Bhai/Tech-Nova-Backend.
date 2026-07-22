@@ -25,8 +25,22 @@ export function emailHtml(title, bodyHtml, brand = 'TechNova') {
 }
 
 export async function sendMail(to, subject, html) {
-  console.log('GMAIL_USER:', user)
-  console.log('Has password:', !!pass)
+  let { user, pass } = await mailConfig()
+
+  console.log("========== SMTP DEBUG ==========")
+  console.log("GMAIL_USER:", user)
+  console.log("Has password:", !!pass)
+
+  if (!user || !pass) {
+    console.error("Missing Gmail credentials")
+    return false
+  }
+
+  user = user.trim()
+  pass = pass.replace(/\s+/g, "")
+
+  // ...rest of your existing code...
+}
   if (!user || !pass) return false
   user = user.trim(); pass = pass.replace(/\s+/g, '')
 
