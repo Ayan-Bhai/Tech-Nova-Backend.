@@ -5,7 +5,7 @@
    ============================================================ */
 import { Hono } from 'hono'
 import { q, one, run, tx, getSetting, setSetting } from './db.js'
-import { requireAdmin, requireOwner, getSiteSettings } from './helpers.js'
+import { requireAdmin, requireOwner, getSiteSettings, sha256hex, randHex } from './helpers.js'
 import { sendMail, emailHtml, mailConfig } from './mailer.js'
 
 const admin = new Hono()
@@ -206,6 +206,52 @@ admin.get('/users', async (c) => {
   const users = await q(`SELECT id, email, name, role, verified, created_at FROM users ORDER BY id DESC LIMIT 200`)
   for (const u of users) u.id = Number(u.id)
   return c.json({ users, me: { id: Number(a.id), role: a.role } })
+})
+admin.post('/users', async (c) => {
+  const a = c.get('staff')
+  const b = await c.req.json().catch(() => ({}))
+  const name = String(b.name || '').trim()
+  const em = String(b.email || '').trim().toLowerCase()
+  const password = String(b.password || '')
+  const role = ['customer', 'admin'].includes(b.role) ? b.role : 'customer'
+
+  if (!name || !em || !password) return c.json({ error: 'Name, email and password are required.' }, 400)
+  if (password.length < 6) return c.json({ error: 'Password must be at least 6 characters.' }, 400)
+  if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(em)) return c.json({ error: 'Enter a valid email address.' }, 400)
+  if (role === 'admin' && a.role !== 'owner') return c.json({ error: 'Only the owner can create admin accounts.' }, 403)
+
+  const existing = await one(`SELECT id, verified FROM users WHERE email = $1`, [em])
+  if (existing && existing.verified) return c.json({ error: 'This email is already registered.' }, 400)
+
+  const salt = randHex(8)
+  const hash = sha256hex(salt + password)
+  let userId
+  if (existing) {
+    // unverified leftover signup — take over the row
+    await run(`UPDATE users SET name=$1, pass_hash=$2, salt=$3, role=$4, verified=1, verify_code=NULL, verify_expires=NULL WHERE id=$5`,
+      [name, hash, salt, role, existing.id])
+    userId = Number(existing.id)
+  } else {
+    const r = await one(
+      `INSERT INTO users (email, name, pass_hash, salt, role, verified) VALUES ($1,$2,$3,$4,$5,1) RETURNING id`,
+      [em, name, hash, salt, role])
+    userId = Number(r.id)
+  }
+
+  /* optional welcome email with the login details (fails silently if email off) */
+  let emailSent = false
+  if (b.send_email) {
+    try {
+      emailSent = await sendMail(em, 'Your TechNova account is ready',
+        emailHtml('Welcome to TechNova',
+          `<p style="margin:0 0 18px;color:#444;font-size:14px;line-height:1.6">Hi ${name.replace(/[<>&]/g, '')}, an account was created for you${role === 'admin' ? ' with <strong>admin</strong> access' : ''}. You can log in with:</p>` +
+          `<div style="padding:16px 18px;background:#f6f6f6;border-radius:12px;font-size:14px;color:#111;line-height:1.9"><strong>Email:</strong> ${em}<br/><strong>Password:</strong> ${password.replace(/[<>&]/g, '')}</div>` +
+          `<p style="margin:18px 0 0;color:#777;font-size:13px">Please change your password after your first login.</p>`))
+    } catch (e) { console.error('welcome mail:', e.message) }
+  }
+
+  const user = await one(`SELECT id::int, email, name, role, verified, created_at FROM users WHERE id = $1`, [userId])
+  return c.json({ ok: true, user, emailSent })
 })
 admin.delete('/users/:id', async (c) => {
   const a = c.get('staff')
