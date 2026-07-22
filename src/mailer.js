@@ -26,8 +26,15 @@ export function emailHtml(title, bodyHtml, brand = 'TechNova') {
 
 export async function sendMail(to, subject, html) {
   let { user, pass } = await mailConfig()
-  if (!user || !pass) return false
-  user = user.trim(); pass = pass.replace(/\s+/g, '')
+
+  // DEBUG — remove after confirming credentials load correctly
+  console.log('[mailer] user:', user ? user : '(empty)')
+  console.log('[mailer] pass length:', pass ? pass.length : 0)
+
+  if (!user || !pass) {
+    console.error('[mailer] Missing credentials — check GMAIL_USER / GMAIL_APP_PASSWORD env vars')
+    return false
+  }
 
   return new Promise((resolve) => {
     let buf = ''
@@ -35,7 +42,7 @@ export async function sendMail(to, subject, html) {
     const finish = (ok, why) => {
       if (done) return
       done = true
-      if (!ok && why) console.error('sendMail failed:', why)
+      if (!ok && why) console.error('[mailer] sendMail failed:', why)
       try { sock.destroy() } catch {}
       resolve(ok)
     }
@@ -47,8 +54,7 @@ export async function sendMail(to, subject, html) {
     // Dot-stuff any body lines starting with '.'
     const body = html.replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..')
 
-    // Full DATA payload per RFC 5321:
-    //   headers \r\n\r\n body \r\n.\r\n
+    // Full DATA payload per RFC 5321
     const dataPayload =
       'From: TechNova <' + user + '>\r\n' +
       'To: <' + to + '>\r\n' +
@@ -57,26 +63,25 @@ export async function sendMail(to, subject, html) {
       'Content-Type: text/html; charset=utf-8\r\n' +
       '\r\n' +
       body + '\r\n' +
-      '.'   // lone dot — sock.write appends \r\n below
+      '.'   // lone dot; sock.write appends \r\n → ".\r\n"
 
     const steps = [
-      [null,                                 ['220']], // 0 — server greeting
-      ['EHLO technova.local',                ['250']], // 1 — may be multi-line
+      [null,                                 ['220']], // 0 server greeting
+      ['EHLO technova.local',                ['250']], // 1 may be multi-line
       ['AUTH LOGIN',                         ['334']], // 2
-      [Buffer.from(user).toString('base64'), ['334']], // 3 — username
-      [Buffer.from(pass).toString('base64'), ['235']], // 4 — password
+      [Buffer.from(user).toString('base64'), ['334']], // 3 username
+      [Buffer.from(pass).toString('base64'), ['235']], // 4 password
       ['MAIL FROM:<' + user + '>',          ['250']], // 5
       ['RCPT TO:<' + to + '>',             ['250', '251']], // 6
       ['DATA',                               ['354']], // 7
-      [dataPayload,                          ['250']], // 8 — body + lone dot
+      [dataPayload,                          ['250']], // 8 body + lone dot
       ['QUIT',                               ['221']]  // 9
     ]
     let step = 0
 
     function advance() {
-      // SMTP multi-line replies (e.g. EHLO): continuation lines use dash "250-..."
-      // The FINAL line of any reply uses a space "250 OK\r\n"
-      // Match the last such final line in the buffer.
+      // SMTP final reply line always has a space after code: "250 OK\r\n"
+      // Multi-line continuations use a dash: "250-EXT\r\n" — we wait for the final line.
       const m = buf.match(/(\d{3}) [^\r\n]*\r\n$/)
       if (!m) return
       const code = m[1]
@@ -84,15 +89,14 @@ export async function sendMail(to, subject, html) {
 
       const [, expect] = steps[step]
       if (!expect.includes(code)) {
-        if (step === steps.length - 1) return finish(true) // QUIT mismatch is fine — mail sent
+        if (step === steps.length - 1) return finish(true) // QUIT mismatch is fine
         return finish(false, 'SMTP ' + code + ' at step ' + step)
       }
 
       step++
       if (step >= steps.length) return finish(true)
 
-      // Every command including the DATA body gets \r\n appended.
-      // The body ends with a bare '.' and sock.write adds '\r\n' → ".\r\n" which is correct.
+      // Every step gets \r\n — body ends with bare '.' so this makes it ".\r\n" (correct)
       sock.write(steps[step][0] + '\r\n')
     }
 
